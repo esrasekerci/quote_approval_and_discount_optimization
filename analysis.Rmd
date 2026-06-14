@@ -1,0 +1,590 @@
+---
+title: "sompo_case"
+author: "esrasekerci"
+output: pdf_document
+---
+```
+Beklentiler :
+- Veriyi genel anlamda analiz etmeniz beklenmektedir. Bu ve sonraki aşamalar için veriyi istediğiniz şekilde manipüle edebilirsiniz.
+- Teklif Onay Durumu sütununu dikkate alarak müşterinin teklifi onaylama olasılığını tahminleyen modeller kurmanız beklenmektedir. Modellerin ve parametrelerinin ne ve neden seçildiğine ilişkin kısa açıklamalar eklemeniz beklenmektedir.
+- Model sonuçlarını metrikler üzerinden kıyaslamanız ve en başarılı gördüğünüz modeli nedenleri ile belirtmeniz beklenmektedir.
+- Şirket kârından feragat ederek teklif primi üzerinden %10’a kadar indirim yapma opsiyonu tanıdı ve portföyünü büyütmek istedi. En az indirim ile en fazla portföy büyümesini nasıl sağlayabilirsiniz ? Bunu tespit etmek için nasıl bir yol izlersiniz ? Nasıl aksiyonlar alırsınız ? Somut örneklerle belirtmeniz ve açıklamanız beklenmektedir.
+- Genel olarak süreçte yapılanların ve önerilerin max 7-8 sayfa uzunluğunda bir sunuma dökülmesi beklenmektedir.
+- Analiz sürecinde excel kullanılabilir. Analiz ve modelleme aşamasında yazılan kodların paylaşılması da beklenmektedir. R, Python dilleri, Knime tool’u kullanılabilir.
+ 
+Not: Çalışmanın net bir doğrusu bulunmamaktadır. Analizlere, modellere ve önerilere olan bakış açınız, izlediğiniz yol, yorumlarınız daha büyük bir öneme sahiptir. Dilleri veya toolları çok iyi seviyede kullanmanız beklenmemektedir fakat kodların üzerinde yorum satırları olarak notlar ve açıklamaların olması beklenmektedir.
+```
+
+## Initial Settings
+
+```{r}
+library(readxl)
+library(tidyverse)
+library(janitor)
+library(skimr)
+library(naniar)
+library(scales)
+library(patchwork)
+library(forcats)
+library(glue)
+library(dplyr)
+library(forcats)
+library(tidyr)
+library(ggplot2)
+library(moments)
+library(purrr)
+library(tibble)
+library(writexl)
+```
+
+```{r}
+getwd()
+```
+
+```{r}
+file_path <- "Case_Study_Data.xlsx"
+
+dict <- read_excel(file_path, sheet = "Açıklamalar")
+# standardize column names
+df  <- read_excel(file_path, sheet = "DATA") |>
+  clean_names()
+
+names(df)
+```
+```{r}
+head(df)
+```
+
+```{r}
+glimpse(df)
+```
+# Data Cleaning and Tidying
+
+```{r}
+# `yas = 0` is treated as an invalid placeholder rather than a true value
+df <- df %>%
+  mutate(
+    yas = na_if(yas, 0)
+  )
+```
+
+
+```{r}
+# duplicates in quote ID
+df |>
+  summarise(
+    n_rows = n(),
+    n_distinct_quote = n_distinct(teklif_numarasi),
+    duplicated_quote_ids = n() - n_distinct(teklif_numarasi)
+  )
+
+# target balance
+df |>
+  count(teklif_onay_durumu) |>
+  mutate(prop = n / sum(n))
+
+# missingness
+mean(is.na(df)) * 100
+
+missing_tbl <- df |>
+  summarise(across(everything(), ~ sum(is.na(.)))) |>
+  pivot_longer(everything(), names_to = "variable", values_to = "n_missing") |>
+  mutate(pct_missing = n_missing / nrow(df)) |>
+  arrange(desc(n_missing))
+
+missing_tbl
+```
+
+```{r}
+all(is.na(df$ilce) == is.na(df$yas))
+```
+
+```{r}
+df %>%
+  mutate(
+    ilce_missing = is.na(ilce),
+    yas_missing = is.na(yas)
+  ) %>%
+  group_by(sigortali_tipi) %>%
+  summarise(
+    n = n(),
+    ilce_missing_n = sum(ilce_missing),
+    ilce_missing_pct = mean(ilce_missing),
+    yas_missing_n = sum(yas_missing),
+    yas_missing_pct = mean(yas_missing)
+  )
+```
+
+``` Missingness Mechanism
+`yas` and `ilce` are retained in raw form during EDA. Their missingness is  MNAR / structural and fully aligned with `sigortali_tipi = "TÜZEL"`, not as an ordinary data-quality problem. Therefore, final handling will be decided at the modeling stage based on predictive contribution and the missing-data requirements of the selected algorithms.
+
+```
+
+```{r}
+# cast variables
+df <- df %>%
+  mutate(
+    teklif_numarasi = as.character(teklif_numarasi),
+
+    hasarsizlik_indirimi_kademesi = factor(
+      hasarsizlik_indirimi_kademesi,
+      levels = sort(unique(hasarsizlik_indirimi_kademesi)),
+      ordered = TRUE
+    ),
+
+    trafik_basamak_kodu = factor(
+      trafik_basamak_kodu,
+      levels = sort(unique(trafik_basamak_kodu)),
+      ordered = TRUE
+    ),
+
+    marka = as.factor(marka),
+    arac_yasi = as.numeric(arac_yasi),
+    model_yili = as.numeric(model_yili),
+    yakit_tipi = as.factor(yakit_tipi),
+    il = as.factor(il),
+
+    ilce = as.factor(ilce),
+
+    yas = as.numeric(yas),
+    teklif_primi = as.numeric(teklif_primi),
+    portfoy_ayrimi = as.factor(portfoy_ayrimi),
+
+    sigortali_tipi = recode(sigortali_tipi,
+                            "O" = "ÖZEL",
+                            "T" = "TÜZEL") %>%
+      factor(levels = c("ÖZEL", "TÜZEL")),
+
+    teklif_onay_durumu = recode(teklif_onay_durumu,
+                                "T" = "ONAYLANMADI",
+                                "P" = "ONAYLANDI") %>%
+      factor(levels = c("ONAYLANMADI", "ONAYLANDI"))
+  )
+head(df)
+```
+```{r}
+glimpse(df)
+```
+
+```{r}
+summary(df)
+```
+```{r}
+iqr_bounds <- function(x) {
+  q1 <- unname(quantile(x, 0.25, na.rm = TRUE))
+  q3 <- unname(quantile(x, 0.75, na.rm = TRUE))
+  iqr_val <- IQR(x, na.rm = TRUE)
+
+  c(lower = q1 - 1.5 * iqr_val,
+    upper = q3 + 1.5 * iqr_val)
+}
+
+flag_iqr <- function(x) {
+  b <- iqr_bounds(x)
+  out <- x < b[["lower"]] | x > b[["upper"]]
+  out[is.na(out)] <- FALSE
+  out
+}
+
+flag_robust_z <- function(x, thr = 3.5) {
+  med <- median(x, na.rm = TRUE)
+  mad_val <- mad(x, constant = 1, na.rm = TRUE)
+
+  if (is.na(mad_val) || mad_val == 0) {
+    return(rep(FALSE, length(x)))
+  }
+
+  rz <- 0.6745 * (x - med) / mad_val
+  out <- abs(rz) > thr
+  out[is.na(out)] <- FALSE
+  out
+}
+
+num_outlier_summary <- df %>%
+  select(where(is.numeric)) %>%
+  summarise(
+    across(
+      everything(),
+      list(
+        iqr_n   = ~ sum(flag_iqr(.)),
+        iqr_pct = ~ round(100 * sum(flag_iqr(.)) / sum(!is.na(.)), 2),
+        rz_n    = ~ sum(flag_robust_z(.)),
+        rz_pct  = ~ round(100 * sum(flag_robust_z(.)) / sum(!is.na(.)), 2)
+      ),
+      .names = "{.col}_{.fn}"
+    )
+  ) %>%
+  pivot_longer(
+    cols = everything(),
+    names_to = c("variable", ".value"),
+    names_pattern = "^(.*)_(iqr_n|iqr_pct|rz_n|rz_pct)$"
+  ) %>%
+  arrange(desc(iqr_n), desc(rz_n))
+
+num_outlier_summary
+```
+```{r}
+ggplot(df, aes(x = teklif_onay_durumu, y = log1p(teklif_primi), fill = teklif_onay_durumu)) +
+  geom_violin(alpha = 0.35, trim = FALSE, show.legend = FALSE) +
+  geom_boxplot(width = 0.18, outlier.alpha = 0.06, show.legend = FALSE) +
+  labs(
+    title = "Distribution of Log Premium by Approval Status",
+    x = "Approval Status",
+    y = "log(1 + Quote Premium)"
+  ) +
+  theme_minimal(base_size = 10) +
+  theme(
+    plot.title = element_text(face = "bold"),
+    axis.title = element_text(face = "bold")
+  )
+```
+
+```{r}
+premium_outliers <- df %>%
+  filter(flag_iqr(teklif_primi))
+
+premium_outliers %>%
+  arrange(desc(teklif_primi)) %>%
+  select(
+    teklif_numarasi, teklif_primi, marka, arac_yasi,
+    yakit_tipi, il, ilce, yas, portfoy_ayrimi,
+    sigortali_tipi, teklif_onay_durumu
+  ) %>%
+  slice_head(n = 30)
+```
+
+```{r}
+# examine the bivariate frequency structure of `model_yili` and `arac_yasi`
+df |>
+  count(model_yili, arac_yasi) |>
+  arrange(model_yili, arac_yasi)
+```
+
+```{r}
+df %>%
+  mutate(
+    expected_arac_yasi = 2024 - model_yili,
+    age_year_match = arac_yasi == expected_arac_yasi
+  ) %>%
+  summarise(
+    n = n(),
+    mismatches = sum(!age_year_match, na.rm = TRUE),
+    mismatch_pct = mean(!age_year_match, na.rm = TRUE)
+  )
+# keeping both variables would introduce deterministic redundancy and may cause multicollinearity in inferential models
+```
+```{r}
+df <- df %>% select(-arac_yasi)
+```
+
+```{r}
+head(df)
+```
+
+``` Outlier&Anomaly Detection
+- For `teklif_primi`, summary statistics and plots indicated a heavy right-tailed distribution rather than obvious recording errors: median = 11,048, mean = 14,394, max = 646,562, and the log-transformed premium distribution remained smooth. Therefore, these observations were treated as valid extreme values, and premium was retained in the dataset.
+
+- Since `arac_yasi` is fully determined by `model_yili`, it was removed.
+
+```
+
+## EDA
+
+**Question 1: What are the marginal distributions of the numeric variables?**
+
+```{r}
+num_vars <- df %>%
+  select(where(is.numeric)) %>%
+  pivot_longer(everything(), names_to = "variable", values_to = "value") %>%
+  group_by(variable) %>%
+  summarise(
+    skewness = skewness(value, na.rm = TRUE),
+    kurtosis = kurtosis(value, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+num_vars
+```
+
+```
+`teklif_primi` is a non-normal numeric feature: it is strongly right-skewed and heavy-tailed, which is consistent with insurance-pricing data. Therefore, raw premium should be retained for business interpretation, while log_teklif_primi is justified for visualization and later robustness checks.
+```
+
+```{r fig.width=15, fig.height=4.8, message=FALSE, warning=FALSE}
+base_theme <- theme_minimal(base_size = 10) +
+  theme(
+    plot.title = element_text(face = "bold", size = 12, hjust = 0.5),
+    axis.title = element_text(face = "bold", size = 10),
+    axis.text = element_text(size = 9),
+    plot.margin = margin(5, 8, 5, 8)
+  )
+
+p_age <- df %>%
+  filter(!is.na(yas)) %>%
+  ggplot(aes(x = yas)) +
+  geom_histogram(aes(y = after_stat(density)),
+                 bins = 25, fill = "steelblue", color = "white", alpha = 0.85) +
+  geom_density(color = "firebrick", linewidth = 0.9) +
+  geom_vline(xintercept = median(df$yas, na.rm = TRUE),
+             linetype = "dashed", linewidth = 0.8) +
+  labs(title = "Insured Age", x = "Age", y = "Density") +
+  base_theme
+
+p_model <- ggplot(df, aes(x = factor(model_yili))) +
+  geom_bar(fill = "steelblue", alpha = 0.85) +
+  labs(title = "Vehicle Model Year", x = "Model Year", y = "Count") +
+  base_theme
+
+p_premium <- ggplot(df, aes(x = log1p(teklif_primi))) +
+  geom_histogram(aes(y = after_stat(density)),
+                 bins = 45, fill = "steelblue", color = "white", alpha = 0.85) +
+  geom_density(color = "firebrick", linewidth = 0.9, adjust = 1.1) +
+  geom_vline(xintercept = median(log1p(df$teklif_primi), na.rm = TRUE),
+             linetype = "dashed", linewidth = 0.8) +
+  labs(title = "Quote Premium", x = "log1p(Premium)", y = "Density") +
+  base_theme
+
+(p_age | p_model | p_premium) +
+  plot_layout(widths = c(1, 1, 1.15))
+```
+
+**Question 2: What are the marginal distributions of the categorical variables, and do any categories appear sparse, imbalanced, or operationally dominant?**
+
+```{r}
+cat_vars <- c(
+  "teklif_onay_durumu",
+  "sigortali_tipi",
+  "portfoy_ayrimi",
+  "yakit_tipi",
+  "il",
+  "marka",
+  "trafik_basamak_kodu",
+  "hasarsizlik_indirimi_kademesi"
+)
+```
+
+```{r}
+for (v in cat_vars) {
+  cat("\n", v, "\n", sep = "")
+  
+  tab <- sort(table(df[[v]]), decreasing = TRUE)
+  pct <- percent(as.numeric(tab) / sum(tab), accuracy = 0.1)
+  
+  for (i in seq_along(tab)) {
+    cat(names(tab)[i], ": ", tab[i], " (", pct[i], ")\n", sep = "")
+  }
+}
+```
+
+**Question 3: Which predictors show the strongest marginal association with approval status, and how does approval vary across their levels or values?**
+
+```{r}
+df <- df %>%
+  mutate(
+    y_bin = if_else(teklif_onay_durumu == "ONAYLANDI", 1, 0),
+    log_teklif_primi = log1p(teklif_primi)
+  )
+```
+
+```{r}
+cat_vars <- c(cat_vars, "ilce")
+cat_vars <- setdiff(cat_vars, "teklif_onay_durumu")
+```
+
+```{r}
+cramers_v <- function(x, y) {
+  tab <- table(x, y)
+  chi2 <- suppressWarnings(chisq.test(tab, correct = FALSE)$statistic)
+  n <- sum(tab)
+  k <- min(nrow(tab), ncol(tab))
+  as.numeric(sqrt(chi2 / (n * (k - 1))))
+}
+
+cat_assoc <- lapply(cat_vars, function(v) {
+  tab <- table(df[[v]], df$teklif_onay_durumu)
+  chi <- suppressWarnings(chisq.test(tab, correct = FALSE))
+  
+  tibble(
+    variable = v,
+    chi_sq_p = chi$p.value,
+    cramers_v = cramers_v(df[[v]], df$teklif_onay_durumu)
+  )
+}) %>%
+  bind_rows() %>%
+  arrange(desc(cramers_v))
+
+cat_assoc
+```
+```{r}
+num_vars <- c("yas", "model_yili", "teklif_primi")
+
+num_assoc <- lapply(num_vars, function(v) {
+  tmp <- df %>%
+    select(all_of(c(v, "y_bin"))) %>%
+    filter(complete.cases(.))
+
+  tibble(
+    variable = v,
+    point_biserial = cor(tmp[[v]], tmp[["y_bin"]]),
+    wilcox_p = wilcox.test(tmp[[v]] ~ tmp[["y_bin"]])$p.value
+  )
+}) %>%
+  bind_rows() %>%
+  arrange(desc(abs(point_biserial)))
+
+num_assoc
+```
+
+```
+The response-association screen shows that `portfoy_ayrimi` is the strongest categorical marginal predictor of approval, followed by `sigortali_tipi` and `hasarsizlik_indirimi_kademesi`. Geographic and brand variables have weaker but still non-zero marginal association. Among numeric variables, `teklif_primi` has the strongest relationship with approval and its point-biserial correlation is negative, indicating that higher premiums are associated with lower approval probability. However, the effect size is still modest, and the numeric distributions overlap heavily between approved and non-approved groups. Thus, no single variable explains approval well in isolation; approval is likely driven by multiple factors jointly.
+```
+
+**Question 4: Are there signs of confounding or interaction, especially between premium, portfolio segment, and insured type?**
+
+```{r}
+# joint stratification: descriptive evidence for confounding structure
+joint_summary <- df %>%
+  group_by(portfoy_ayrimi, sigortali_tipi) %>%
+  summarise(
+    n = n(),
+    approval_rate = mean(y_bin),
+    median_premium = median(teklif_primi, na.rm = TRUE),
+    mean_log_premium = mean(log_teklif_primi, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(approval_rate))
+
+joint_summary
+
+# additive vs interaction models
+m_main <- glm(
+  y_bin ~ log_teklif_primi + portfoy_ayrimi + sigortali_tipi,
+  data = df,
+  family = binomial()
+)
+
+m_int <- glm(
+  y_bin ~ log_teklif_primi * portfoy_ayrimi +
+          log_teklif_primi * sigortali_tipi,
+  data = df,
+  family = binomial()
+)
+
+# likelihood-ratio test for overall interaction
+interaction_test <- anova(m_main, m_int, test = "Chisq")
+interaction_test
+
+# extract only interaction coefficients
+interaction_terms <- summary(m_int)$coefficients %>%
+  as.data.frame() %>%
+  tibble::rownames_to_column("term") %>%
+  dplyr::filter(grepl("log_teklif_primi:", term))
+
+interaction_terms
+```
+```
+Joint stratification indicates that both approval rates and premium levels vary across `portfoy_ayrimi × sigortali_tipi` groups, suggesting confounding in the marginal premium–approval relationship. A likelihood-ratio test comparing additive and interaction logistic models shows that adding premium interaction terms significantly improves fit (p = 0.0021). The interaction is driven mainly by `log_teklif_primi × portfoy_ayrimi (YENİ İŞ)`, indicating that the negative effect of premium on approval is weaker in the `YENİ İŞ` segment than in the reference portfolio group. In contrast, there is no strong evidence that the premium effect differs by insured type.
+```
+
+**Question 5: Are any predictors strongly associated with each other in a way that suggests multicollinearity?**
+
+```{r}
+num_pred <- c("yas", "model_yili", "teklif_primi", "log_teklif_primi")
+
+num_corr <- df %>%
+  select(all_of(num_pred)) %>%
+  cor(use = "pairwise.complete.obs")
+
+num_corr
+
+cramers_v <- function(x, y) {
+  tab <- table(x, y)
+  chi2 <- suppressWarnings(chisq.test(tab, correct = FALSE)$statistic)
+  n <- sum(tab)
+  k <- min(nrow(tab), ncol(tab))
+  if (k <= 1) return(NA_real_)
+  as.numeric(sqrt(chi2 / (n * (k - 1))))
+}
+
+cat_pred <- c(
+  "sigortali_tipi",
+  "portfoy_ayrimi",
+  "yakit_tipi",
+  "il",
+  "marka",
+  "trafik_basamak_kodu",
+  "hasarsizlik_indirimi_kademesi"
+)
+
+cv_mat <- outer(cat_pred, cat_pred, Vectorize(function(a, b) {
+  if (a == b) return(1)
+  cramers_v(df[[a]], df[[b]])
+}))
+
+cv_mat <- as.data.frame(cv_mat)
+rownames(cv_mat) <- cat_pred
+colnames(cv_mat) <- cat_pred
+
+cv_mat
+
+m_vif <- glm(
+  y_bin ~ log_teklif_primi + portfoy_ayrimi + sigortali_tipi +
+    hasarsizlik_indirimi_kademesi + trafik_basamak_kodu +
+    yakit_tipi + model_yili,
+  data = df,
+  family = binomial()
+)
+
+vif_tbl <- car::vif(m_vif)
+vif_tbl
+```
+```
+After removing `arac_yasi`, there is no evidence of serious multicollinearity. Numeric correlations are weak except for the expected association between `teklif_primi` and `log_teklif_primi`, since one is a transformation of the other. Categorical predictors show some moderate associations, but none indicate near-redundancy. The adjusted GVIF values are all close to 1, so multicollinearity is not a major concern in the current predictor set.
+```
+
+```
+- `teklif_numarasi` is an identifier only
+- `arac_yasi` is deterministically redundant with `model_yili`
+- `teklif_primi` is highly right-skewed
+- `portfoy_ayrimi` is the strongest categorical driver
+- the premium effect varies by `portfoy_ayrimi`
+- multicollinearity is not a major concern after removing `arac_yasi`
+- missingness in `yas` and `ilce` occurs only within the `TÜZEL` segment, indicating structural missingness linked to customer type.
+```
+
+```{r}
+df_model <- df
+```
+
+```{r}
+glimpse(df_model)
+```
+```{r}
+write_xlsx(df_model, "sompo_model_ready.xlsx")
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
