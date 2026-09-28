@@ -46,7 +46,3 @@ Predictive modeling and optimization framework for insurance quote acceptance. C
 ## Limitations
 
 Historical data only; approval behavior may shift. Limited external features (no agent quality, customer LTV, competitive data). Geographic patterns aggregated to province level.
-
----
-
-**Author:** Esra Sekerci (2026)
